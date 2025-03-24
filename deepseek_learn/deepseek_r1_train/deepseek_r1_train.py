@@ -75,7 +75,7 @@ def mark_reward(completions, **kwargs):
 
 
 if __name__ == '__main__':
-    model_name = "/home/user/Downloads/Qwen2.5-0.5B-Instruct"
+    model_name = "/Users/cxhui/PycharmProjects/LLMProject/Projects/Qwen2.5-0.5B-Instruct"
 
     model = AutoModelForCausalLM.from_pretrained(model_name)
     # 如果使用lora方法训练，取消如下注释
@@ -87,11 +87,12 @@ if __name__ == '__main__':
     # task_type=TaskType.CAUSAL_LM)
     # # 使用lora方法训练
     # model = get_peft_model(model, lora_config)
-    model.cuda()
+    #model.cuda()
     
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    
-    ds = load_dataset('/home/user/wyf/deepseek_learn/gsm8k_chinese')
+
+    ds = load_dataset("swulling/gsm8k_chinese")
+    #ds = load_dataset('/home/user/wyf/deepseek_learn/gsm8k_chinese')
     data = process_data(ds['train'])
     
     output_dir="output"
@@ -106,7 +107,7 @@ if __name__ == '__main__':
         lr_scheduler_type='cosine',
         logging_steps=1,
         bf16=True,
-        per_device_train_batch_size=1,
+        per_device_train_batch_size=16,
         gradient_accumulation_steps=4,
         num_generations=16,
         max_prompt_length=256,
@@ -120,18 +121,17 @@ if __name__ == '__main__':
     )
     
     trainer = GRPOTrainer(
-    model=model,
-    processing_class=tokenizer,
-    reward_funcs=[
-        mark_reward,
-        soft_format_reward,
-        hard_format_reward,
-        digit_reward,
-        correctness_reward
-        ],
-    args=training_args,
-    train_dataset=data,
-
-)
+        model=model,
+        processing_class=tokenizer,
+        reward_funcs=[
+            mark_reward,
+            soft_format_reward,
+            hard_format_reward,
+            digit_reward,
+            correctness_reward
+            ],
+        args=training_args,
+        train_dataset=data,
+    )
     trainer.train()
     trainer.save_model(output_dir)
