@@ -1,3 +1,4 @@
 output/
 *.tgz
 gsm8k_chinese
+*.tar
