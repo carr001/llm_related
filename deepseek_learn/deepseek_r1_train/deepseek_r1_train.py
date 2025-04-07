@@ -6,6 +6,9 @@ import trl
 from trl import GRPOConfig, GRPOTrainer
 from peft import LoraConfig, get_peft_model, TaskType
 
+# debug时使用,vscode没办法添加断点
+import ipdb; ipdb.set_trace()  # 比pdb更可靠[6](@ref)
+
 SYSTEM_PROMPT = """
 按照如下格式生成：
 <think>
