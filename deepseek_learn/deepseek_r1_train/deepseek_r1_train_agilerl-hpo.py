@@ -1,3 +1,4 @@
+#https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/grpo_hpo.html
 import re
 from typing import Tuple
 
@@ -8,30 +9,26 @@ from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from agilerl.algorithms import GRPO
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm
 from agilerl.utils.llm_utils import HuggingFaceGym
+from agilerl.utils.utils import create_population
 
-import ipdb; ipdb.set_trace()  # 比pdb更可靠[6](@ref)
-
-import os
-os.environ["WANDB_MODE"] = "disabled" 
-
+#import ipdb; ipdb.set_trace()  # 比pdb更可靠[6](@ref)
 
 MODEL_PATH = "Qwen/Qwen2.5-3B"
-MODEL_PATH = "/data/home/cxhui/test/llm_related/models/Qwen2.5-3B"
+MODEL_PATH = "/Users/cxhui/PycharmProjects/LLMProject/Projects/Qwen2.5-0.5B-Instruct"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
-DATASET = "./Countdown-Tasks-3to4"
 
 
 def create_model(pretrained_model_name_or_path):
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
         torch_dtype=torch.bfloat16,
-        attn_implementation="eager",
         #attn_implementation="flash_attention_2",
     )
-    model.to('cuda')
     peft_config = LoraConfig(
         r=32,
         lora_alpha=32,
@@ -73,7 +70,7 @@ def countdown_chat_template(q, a, tokenizer):
         padding_side="left",
         return_attention_mask=True,
     )
-    return tokenized_prompt.to('cuda')
+    return tokenized_prompt
 
 
 def make_dataset(dataset_name: str) -> Tuple[Dataset, Dataset]:
@@ -123,14 +120,12 @@ def equation_reward_func(completions, target, nums, **kwargs):
             equation = answer_tags[0].strip()
             used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
 
-            if sorted(used_numbers) != sorted(numbers):
-                print(f"Numbers mismatch: {used_numbers} vs {numbers}")
+            if sorted(used_numbers) != sorted(numbers.flatten().tolist()):
                 rewards.append(0.0)
                 continue
 
             allowed_pattern = r"^[\d+\-*/().\s]+$"
             if not re.match(allowed_pattern, equation):
-                print(f"Equation format invalid: {equation}")
                 rewards.append(0.0)
                 continue
 
@@ -139,7 +134,6 @@ def equation_reward_func(completions, target, nums, **kwargs):
             if abs(float(result) - float(gt)) < 1e-5:
                 rewards.append(1.0)
             else:
-                print(f"Result {result} doesn't match target {gt}")
                 rewards.append(0.0)
         except Exception as e:
             print(f"Equation error: {e}")
@@ -155,7 +149,7 @@ def combined_rewards(completion, solution, prompt):
 
     print(
         f"""
-    ============================================, \n
+    ============================================ \n
     Completion: {completion}, \n
     Numbers: {prompt}, \n
     Correct Answer: {solution.item()} \n
@@ -189,49 +183,115 @@ def custom_collate_fn(batch):
     return {"answer": answers, "question": questions}
 
 
-def main():
+def main(init_hp, mut_p):
     # Instantiate the model and the associated tokenizer
     model = create_model(pretrained_model_name_or_path=MODEL_PATH)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
-
-    #accelerator = Accelerator()
-
     # Convert the HuggingFace dataset into a Gymnasium environment
+    accelerators = [Accelerator() for _ in range(init_hp["POP_SIZE"])]
     env = HuggingFaceGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         reward_fn=combined_rewards,
         apply_chat_template_fn=countdown_chat_template,
-        data_batch_size_per_gpu=1,
+        data_batch_size_per_gpu=2,
         custom_collate_fn=custom_collate_fn,
+        accelerator=accelerators[0],
     )
-    # Instantiate the grpo agent
-    agent = GRPO(
-        env.observation_space,
-        env.action_space,
-        actor_network=model,
-        pad_token_id=tokenizer.eos_token_id,
-        batch_size=1,
-        max_output_tokens=1024,
-        group_size=12,
-        reduce_memory_peak=True,
-        device='cuda',
-        # accelerator=accelerator,
+
+    init_hp["actor_network"] = model
+    init_hp["pad_token_id"] = tokenizer.eos_token_id
+
+    hp_config = HyperparameterConfig(
+        beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
+        lr=RLParameter(min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]),
+        group_size=RLParameter(
+            min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int
+        ),
     )
+
+    pop = create_population(
+        algo=init_hp["ALGO"],
+        observation_space=env.observation_space,
+        action_space=env.action_space,
+        net_config=None,
+        INIT_HP=init_hp,
+        hp_config=hp_config,
+        population_size=init_hp["POP_SIZE"],
+        accelerator=accelerators,
+    )
+
+    tournament = TournamentSelection(
+        init_hp["TOURN_SIZE"],
+        init_hp["ELITISM"],
+        init_hp["POP_SIZE"],
+        init_hp["EVAL_LOOP"],
+    )
+
+    mutations = Mutations(
+        no_mutation=mut_p["NO_MUT"],
+        architecture=0,
+        new_layer_prob=0,
+        parameters=0,
+        activation=0,
+        rl_hp=mut_p["RL_HP_MUT"],
+        mutation_sd=mut_p["MUT_SD"],
+        rand_seed=mut_p["RAND_SEED"],
+        accelerator=accelerators[0],
+    )
+
     finetune_llm(
-        pop=[agent],
+        pop=pop,
         env=env,
+        init_hp=init_hp,
         evaluation_interval=10,
-        wb=True,
+        wb=False,
         save_elite=True,
-        elite_path="checkpoints",
+        elite_path="saved_llms",
         max_reward=2.0,
-        #accelerator=accelerator,
+        evo_steps=10,
+        mutation=mutations,
+        tournament=tournament,
+        accelerator=accelerators[0],
+        verbose=True,
     )
 
 
 if __name__ == "__main__":
-    main()
+    MUTATION_PARAMS = {
+        "NO_MUT": 0.1,
+        "RL_HP_MUT": 0.6,
+        "MUT_SD": 0.1,
+        "RAND_SEED": 42,
+        "MIN_LR": 0.0000001,
+        "MAX_LR": 0.00001,
+        "MIN_BETA": 0.0001,
+        "MAX_BETA": 0.01,
+        "MIN_GROUP_SIZE": 4,
+        "MAX_GROUP_SIZE": 12,
+    }
+
+    INIT_HP = {
+        "ALGO": "GRPO",
+        "BATCH_SIZE": 1,
+        "REDUCE_MEMORY_PEAK": True,
+        "BETA": 0.001,
+        "LR": 0.000005,
+        "CLIP_COEF": 0.2,
+        "MAX_GRAD_NORM": 0.1,
+        "UPDATE_EPOCHS": 1,
+        "GROUP_SIZE": 2,
+        "TEMPERATURE": 0.9,
+        "CALC_POSITION_EMBEDDINGS": True,
+        "MIN_OUTPUT_TOKENS": None,
+        "MAX_OUTPUT_TOKENS": 10,
+        "COSINE_lR_SCHEDULER": None,
+        "TOURN_SIZE": 2,
+        "ELITISM": True,
+        "POP_SIZE": 1,
+        "EVAL_LOOP": 1,
+    }
+    main(INIT_HP, MUTATION_PARAMS)

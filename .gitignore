@@ -3,4 +3,4 @@ output/
 gsm8k_chinese
 *.tar
 .vscode
-
+wandb/
